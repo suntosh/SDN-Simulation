@@ -1,0 +1,28 @@
+
+
+10:33:02.392972
+Register Request Sent
+
+
+10:33:02.408973
+Register Response received
+
+
+10:33:02.589970
+Routing Update
+2,0:0
+2,1:1
+2,2:2
+Routing Complete
+
+
+10:33:22.489970
+Neighbor Dead 1
+
+
+10:33:22.829971
+Routing Update
+2,0:0
+2,1:-1
+2,2:2
+Routing Complete
