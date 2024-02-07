@@ -62,7 +62,6 @@ class NetworkSwitch(object):
 
 class NetworkGraph(object):
       
-   
     def __init__(self, filename):
         self.fileName = filename
         self.network_table = []
@@ -133,7 +132,6 @@ class NetworkGraph(object):
 
         return routing_table
     
-
     def recursive_graph_pathing(self, src, dest , hops, path, cost):
         node = self.switch_nodes[src]
         neighbours = node.neighbours
@@ -148,14 +146,13 @@ class NetworkGraph(object):
                     path_copy2.append(i) 
                     self.recursive_graph_pathing( i , dest , hops, path_copy2, cost + neighbours[i])
                
-
-
     def toList(self):
         routing_table = []
         for route in self.network_table:
             routing_table.append( route.toList() )
         return routing_table
 
+    
     def dump_network(self):
         for route in self.network_table:
             print(route)
@@ -305,9 +302,38 @@ def  Start_Server(port, num_of_switches , routing_tables):
 #Gotta try this 
 #https://gist.github.com/gabrielfalcao/20e567e188f588b65ba2
 
+def open_ephemeral_socket( udp ):
+    udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    
+    udp.bind(('', 0))
+    return udp.getsockname()
+
+
 
 def main():
     #Check for number of arguments and exit if host/port not provided
+    udp = None 
+
+    udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    
+    udp.bind(('', 0))
+
+    host, port =  udp.getsockname()
+
+    print('udp://{host}:{port}'.format(**locals()))
+
+    if udp is not None:
+        print('getting here ')
+        (data, client_addr) = udp.recvfrom(1024) # Client address really is a tuple of (ip_addr, port number) from the sender
+        print(f"Recieved message from client")
+        data =  data.decode('utf-8')
+        print(data)
+
+    if udp is not None:
+        udp.close()
+        print( 'closing the socket')
+    
+    return 
 
     num_args = len(sys.argv)
     if num_args < 3:
