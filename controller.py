@@ -70,37 +70,38 @@ class NetworkGraph(object):
         self.cost_sheet = {} 
         self.raw_lines = None 
         self.bad_routes = []
+        self.num_nodes = 0
+        self.active_nodes = 0 
+        self.list_of_registered_switches = {}
+        self.controller_socket = None 
     
-    def buildNetworkTable(self):
+    def buildNetworkTable(self, dead_links):
         with open(self.fileName) as f:
             self.raw_lines = f.readlines()
             print(self.raw_lines)
             f.close()
         
-        dead = [3,2]
-        
         for line in self.raw_lines:
             src = None
             dest = None
             cost = None 
-            print(' this line ', line)
+            #print(' this line ', line)
             line = line.strip()
             if ( len(line) == 1 ):
                 self.num_nodes = int(line)
                 continue
             process = True
-            for d in dead:
-                route = line.split() # Eliminating broken links 
-                src = int(route[0])
-                dest = int(route[1])
-                cost = int(route[2]) 
+            route = line.split() # Eliminating broken links 
+            src = int(route[0])
+            dest = int(route[1])
+            cost = int(route[2]) 
+            for d in dead_links:
                 if d == src or d == dest:
                     process = False
-                    print( d, '   ', line)
-            if ( process == False ):
-                self.bad_routes.append( [src, dest , -1 , 9999] )
-                continue
-            print('Them raw lines ', line)
+                if ( process == False ):
+                    self.bad_routes.append( [src, dest , -1 , 9999] )
+                    continue
+            #print('Them raw lines ', line)
             rte = Route( src, dest, cost  )
             self.network_table.append( rte )
             self.nodes.append(src)
@@ -119,29 +120,6 @@ class NetworkGraph(object):
         self.nodes =  sorted(set(self.nodes))
         return None
 
-
-    def remove_dead_link( self, node_id ):
-        """marked_for_removal = None
-        for i in range(0, len(self.network_table)) :
-            if self.network_table[i].from_node == node_id or self.network_table.to_node == node_id:
-                marked_for_removal.append(i)
-        for i in marked_for_removal:
-            self.network_table.pop(i)"""
-            
-        """self.nodes.remove( node_id)
-        remove_cost = []
-        for key in self.cost_sheet.keys():
-            if str(3) in key:
-                remove_cost.append(key)
-                print(key)
-                
-        for k in remove_cost:
-            del self.cost_sheet[k]"""
-            
-        
-            
-    
-                 
 
     def compute_shortest_paths(self):
         self.buildNetworkTable()
@@ -199,8 +177,69 @@ class NetworkGraph(object):
     def dump_network(self):
         for route in self.network_table:
             print(route)
+            
+    def dump_nodes_neighbours(self):
+        for k in self.switch_nodes:
+            print(self.switch_nodes[k]) 
+        self.dispatch_neighbour_addresses()
+            
+    
+    def dispatch_switch_addresses(self):
+        for k in self.list_of_registered_switches.values():
+            self.server_socket.sendto( pickle.dumps([['LOCATIONS'],self.list_of_registered_switches]), ( k.addr , k.port))
+    
 
+    def Start_Server(self, port):
+    
+        print("Creating socket")
+        self.controller_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) # not SOCK_STREAM, which is for TCP. We want UDP, which requires SOCK_DGRAM
 
+        print(f"Binding socket to ip_addr {IP} and port {port}")
+        self.controller_socket.bind((IP, int(port)))
+
+        print(f"We've now bound the socket to {self.controller_socket.getsockname()}, so we can now send messages to the server by specifying its address in sendto")
+        
+        registered = 0; 
+        
+
+        while True:
+
+            (data, client_addr) = self.controller_socket.recvfrom(1024) # Client address really is a tuple of (ip_addr, port number) from the sender
+
+            print(f"Recieved message from client")
+            
+            data =  data.decode('utf-8')
+            data = data.split()
+            network_switch =  NetworkSwitch( data[0].strip(), client_addr[0], client_addr[1])
+            self.list_of_registered_switches[data[0].strip()] = network_switch
+            register_request_received(network_switch.id)
+            register_response = "\r\n"+str(network_switch.id)+"\r\n"
+
+            for nd in self.list_of_registered_switches.values():
+                register_response += str(nd.id)+" "+nd.addr+" "+str(nd.port)+"\r\n"
+
+            registered += 1
+
+            print(f"Acknowledged Register Request for Switch { network_switch.id }")
+
+            self.controller_socket.sendto(register_response.encode('UTF-8'), client_addr)
+            print( registered, ' ', self.num_of_switches)
+            if ( registered == self.num_of_switches):
+                for  nd in self.list_of_registered_switches.values() :
+                    route_update = []
+                    for row in self.routing_tables:
+                        if int(nd.id) == int(row[0]):
+                            route_update.append([row[0],row[1],row[2]])
+                    self.controller_socket.sendto( pickle.dumps(route_update), (nd.addr, nd.port))
+                    
+                for  nd in self.list_of_registered_switches.values() :
+                    neighbour_locations = []
+                    for row in self.routing_tables:
+                        if int(nd.id) == int(row[0]):
+                            neighbour_locations.append([row[0],row[1],row[2]])
+                    self.controller_socket.sendto( pickle.dumps(route_update), (nd.addr, nd.port))
+            
+                    
 def register_request_received(switch_id):
     log = []
     log.append(str(datetime.time(datetime.now())) + "\n")
@@ -304,48 +343,7 @@ def process_dead_links( routing_tables, k ):
         for i in routes_to_remove:
             routing_tables.remove(i)
         
-def  Start_Server(port, num_of_switches , routing_tables):
-    
-    print("Creating socket")
-    server_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) # not SOCK_STREAM, which is for TCP. We want UDP, which requires SOCK_DGRAM
 
-    print(f"Binding socket to ip_addr {IP} and port {port}")
-    server_socket.bind((IP, int(port)))
-
-    print(f"We've now bound the socket to {server_socket.getsockname()}, so we can now send messages to the server by specifying its address in sendto")
-    
-    registered = 0; 
-    list_of_registered_switches = [] 
-
-    while True:
-
-        (data, client_addr) = server_socket.recvfrom(1024) # Client address really is a tuple of (ip_addr, port number) from the sender
-
-        print(f"Recieved message from client")
-        
-        data =  data.decode('utf-8')
-        data = data.split()
-        network_switch =  NetworkSwitch( data[0].strip(), client_addr[0], client_addr[1])
-        list_of_registered_switches.append(network_switch)
-        register_request_received(network_switch.id)
-        register_response = "\r\n"+str(network_switch.id)+"\r\n"
-
-        for nd in list_of_registered_switches:
-            register_response += str(nd.id)+" "+nd.addr+" "+str(nd.port)+"\r\n"
-
-        registered += 1
-
-        print(f"Acknowledged Register Request for Switch { network_switch.id }")
-
-        server_socket.sendto(register_response.encode('UTF-8'), client_addr)
-        print( registered, ' ', num_of_switches)
-        if ( registered == num_of_switches):
-            for  nd in list_of_registered_switches :
-                route_update = []
-                for row in routing_tables:
-                   if int(nd.id) == int(row[0]):
-                        route_update.append([row[0],row[1],row[2]])
-                server_socket.sendto( pickle.dumps(route_update), (nd.addr, nd.port))
 
 
 
@@ -395,7 +393,9 @@ def main():
     
     
     
-    network.buildNetworkTable()
+    network.buildNetworkTable([])
+    network.dump_nodes_neighbours()
+    return
     
     print("The raw lines" ,network.raw_lines)
     #network.remove_dead_link(3)
@@ -403,11 +403,12 @@ def main():
     
     print( "The Nodes ", network.nodes )
     
-    network.remove_dead_link(3)
+    #network.remove_dead_link(3)
     
     print(network.cost_sheet) 
     
     routing_tables = network.generate_routing_table()
+    
     
     
     #routing_table_update( routing_tables )
