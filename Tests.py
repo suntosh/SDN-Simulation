@@ -1,12 +1,41 @@
 #!/usr/bin/env python
 import socket, pickle 
-import time 
+import time, datetime 
+import threading
 
 """with socket() as s:
     s.bind(('',0))
     print(s.getsockname()[1])
     time.sleep(0.20)
     s.close() """
+
+import threading
+
+class KeepAliveThread(threading.Thread):
+
+    def __init__(self, value, neighbours):
+        # execute the base constructor
+        threading.Thread.__init__(self)
+        # store the value
+        self.interval = value
+        self.neighbours = neighbours
+
+    def run(self):
+        while True:
+            timeval = self.interval
+            while timeval > 0:
+                timer = datetime.timedelta(seconds = timeval )
+                time.sleep(1)
+                print(timer)
+                timeval -= 1
+            print("Woke up " , self.interval)
+            for k, j in self.neighbours.items():
+                print(k,j)
+
+
+            
+        
+
 
 def send_message( sock, ip , port, msg ):
     addr = (ip, port)
@@ -27,7 +56,7 @@ def main():
         t.pop(d)
     
     print( t )
-             
+            
             
     return
             
@@ -45,6 +74,17 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+    neighbrs = {'192.67.89.9': 5676, '192.67.9.9': 5670, '192.70.89.9': 5679,'192.7.89.9': 5678}
+    t = KeepAliveThread(3, neighbrs)
+    t1 = KeepAliveThread(7, neighbrs)
+    t2 = KeepAliveThread(4, neighbrs)
+    t.start()
+    t1.start()
+    t2.start()
+    t.join()
+    t1.join()
+    t2.join()
     
     
     

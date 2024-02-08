@@ -69,37 +69,52 @@ class NetworkGraph(object):
         self.nodes = []
         self.cost_sheet = {} 
         self.raw_lines = None 
+        self.bad_routes = []
     
     def buildNetworkTable(self):
         with open(self.fileName) as f:
             self.raw_lines = f.readlines()
+            print(self.raw_lines)
             f.close()
         
-        
+        dead = [3,2]
         
         for line in self.raw_lines:
+            src = None
+            dest = None
+            cost = None 
+            print(' this line ', line)
             line = line.strip()
             if ( len(line) == 1 ):
                 self.num_nodes = int(line)
-            else:
-                route = line.split()
+                continue
+            process = True
+            for d in dead:
+                route = line.split() # Eliminating broken links 
                 src = int(route[0])
                 dest = int(route[1])
                 cost = int(route[2]) 
-                rte = Route( src, dest, cost  )
-                self.network_table.append( rte )
-                self.nodes.append(src)
-                self.nodes.append(dest)
-                str_rte = f'{src}, {dest}'
-                self.cost_sheet[str_rte] = cost
-                str_rte = f'{dest}, {src}'
-                self.cost_sheet[str_rte] = cost
-                if src not in self.switch_nodes:
-                    self.switch_nodes[src] = SwitchNode(src)
-                self.switch_nodes[src].add_neighbour(dest, cost)
-                if dest not in self.switch_nodes:
-                    self.switch_nodes[dest] = SwitchNode(dest)
-                self.switch_nodes[dest].add_neighbour(src, cost)
+                if d == src or d == dest:
+                    process = False
+                    print( d, '   ', line)
+            if ( process == False ):
+                self.bad_routes.append( [src, dest , -1 , 9999] )
+                continue
+            print('Them raw lines ', line)
+            rte = Route( src, dest, cost  )
+            self.network_table.append( rte )
+            self.nodes.append(src)
+            self.nodes.append(dest)
+            str_rte = f'{src}, {dest}'
+            self.cost_sheet[str_rte] = cost
+            str_rte = f'{dest}, {src}'
+            self.cost_sheet[str_rte] = cost
+            if src not in self.switch_nodes:
+                self.switch_nodes[src] = SwitchNode(src)
+            self.switch_nodes[src].add_neighbour(dest, cost)
+            if dest not in self.switch_nodes:
+                self.switch_nodes[dest] = SwitchNode(dest)
+            self.switch_nodes[dest].add_neighbour(src, cost)
 
         self.nodes =  sorted(set(self.nodes))
         return None
@@ -274,8 +289,21 @@ def write_to_log(log):
         # Write to log
         log_file.writelines(log)
 
-
-
+def process_dead_links( routing_tables, k ):
+        routes_to_remove = [] 
+        for i in range(0,len( routing_tables)):
+            route_entry = routing_tables[i]
+            if route_entry[0] == k and route_entry[1] == k:
+                routes_to_remove.append(route_entry)
+            elif route_entry[2] == k and route_entry[0] != k and route_entry[1] != k:
+                routes_to_remove.append(route_entry)
+            elif route_entry[0] == k or route_entry[1] == k:
+                route_entry[2] = -1 
+                route_entry[3] = 9999
+                
+        for i in routes_to_remove:
+            routing_tables.remove(i)
+        
 def  Start_Server(port, num_of_switches , routing_tables):
     
     print("Creating socket")
@@ -309,12 +337,6 @@ def  Start_Server(port, num_of_switches , routing_tables):
 
         print(f"Acknowledged Register Request for Switch { network_switch.id }")
 
-        # Note that we're using sendto and recvfrom for both the client and server examples. These functions don't require a connection (ie. they work with UDP) and are the recommended
-        # way to communicate over UDP. Some of the other functions for sockets only work with TCP, but it's not obvious which those are unless you read the
-        # documentation, which is a good idea but also somewhat annoying. So we would recommend sticking to these functions.
-        #server_socket.sendto(register_response.encode('UTF-8'), client_addr)
-        
-
         server_socket.sendto(register_response.encode('UTF-8'), client_addr)
         print( registered, ' ', num_of_switches)
         if ( registered == num_of_switches):
@@ -327,10 +349,6 @@ def  Start_Server(port, num_of_switches , routing_tables):
 
 
 
-#Gotta try this 
-#https://gist.github.com/gabrielfalcao/20e567e188f588b65ba2
-#https://www.bogotobogo.com/python/Multithread/python_multithreading_subclassing_creating_threads.php
-#https://www.udacity.com/blog/2021/09/create-a-timer-in-python-step-by-step-guide.html
 
 def open_ephemeral_socket( udp ):
     udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -402,29 +420,14 @@ def main():
     print("##########################  ROUTING TABLES ####################################\n")
     print(routing_tables)
     
-    def add_dead_link( k ):
-        routes_to_remove = [] 
-        for i in range(0,len(routing_tables)):
-            x = -1 
-            route_entry = routing_tables[i]
-            if route_entry[0] == k and route_entry[1] == k:
-                routes_to_remove.append(route_entry)
-            elif route_entry[2] == k and route_entry[0] != k and route_entry[1] != k:
-                routes_to_remove.append(route_entry)
-            elif route_entry[0] == k or route_entry[1] == k:
-                route_entry[2] = -1 
-                route_entry[3] = 9999
-                
-        return routes_to_remove
-    
-    routes_to_remove = add_dead_link(3)
-    
-    for i in routes_to_remove:
-        routing_tables.remove(i)
+    process_dead_links( routing_tables , 3)
         
         
     print("\n\n\n")
     
+    for bd_rte in network.bad_routes:
+        routing_tables.append(bd_rte)
+
     print(routing_tables) 
         
 
@@ -442,3 +445,22 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
+
+
+
+
+
+
+
+""" Code References
+
+#https://gist.github.com/gabrielfalcao/20e567e188f588b65ba2
+#https://www.bogotobogo.com/python/Multithread/python_multithreading_subclassing_creating_threads.php
+#https://www.udacity.com/blog/2021/09/create-a-timer-in-python-step-by-step-guide.html
+
+"""
