@@ -17,6 +17,23 @@ def send_message( sock, ip , port, msg ):
 def main():
     print ('hey')
     
+    t = [1,3,5,6,7,8,3,4,5,8]
+    print(t)
+    t_del = []
+    for i in range(0, len(t)):
+        if t[i] == 3:
+            t_del.append(i)
+    for d in t_del:
+        t.pop(d)
+    
+    print( t )
+             
+            
+    return
+            
+        
+    
+    
     addresses = { 52609 : '127.0.0.1', 50022 : '127.0.0.1' , 61146 : '127.0.0.1' }
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 

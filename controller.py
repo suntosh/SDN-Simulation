@@ -68,11 +68,15 @@ class NetworkGraph(object):
         self.switch_nodes = {}
         self.nodes = []
         self.cost_sheet = {} 
+        self.raw_lines = None 
     
     def buildNetworkTable(self):
         with open(self.fileName) as f:
             self.raw_lines = f.readlines()
             f.close()
+        
+        
+        
         for line in self.raw_lines:
             line = line.strip()
             if ( len(line) == 1 ):
@@ -99,6 +103,30 @@ class NetworkGraph(object):
 
         self.nodes =  sorted(set(self.nodes))
         return None
+
+
+    def remove_dead_link( self, node_id ):
+        """marked_for_removal = None
+        for i in range(0, len(self.network_table)) :
+            if self.network_table[i].from_node == node_id or self.network_table.to_node == node_id:
+                marked_for_removal.append(i)
+        for i in marked_for_removal:
+            self.network_table.pop(i)"""
+            
+        """self.nodes.remove( node_id)
+        remove_cost = []
+        for key in self.cost_sheet.keys():
+            if str(3) in key:
+                remove_cost.append(key)
+                print(key)
+                
+        for k in remove_cost:
+            del self.cost_sheet[k]"""
+            
+        
+            
+    
+                 
 
     def compute_shortest_paths(self):
         self.buildNetworkTable()
@@ -310,9 +338,7 @@ def open_ephemeral_socket( udp ):
     udp.bind(('', 0))
     return udp.getsockname()
 
-
-
-def main():
+def test_main():
     #Check for number of arguments and exit if host/port not provided
     udp = None 
 
@@ -337,6 +363,9 @@ def main():
     
     return 
 
+def main():
+    
+    # This is good 
     num_args = len(sys.argv)
     if num_args < 3:
         print ("Usage: python controller.py <port> <config file>\n")
@@ -344,10 +373,68 @@ def main():
 
     print(sys.argv)
     network =  NetworkGraph(sys.argv[2])
-    routing_tables  =  network.generate_routing_table()
-    routing_table_update( routing_tables )
+    #routing_tables  =  network.generate_routing_table()
+    
+    
+    
+    network.buildNetworkTable()
+    
+    print("The raw lines" ,network.raw_lines)
+    #network.remove_dead_link(3)
+    
+    
+    print( "The Nodes ", network.nodes )
+    
+    network.remove_dead_link(3)
+    
+    print(network.cost_sheet) 
+    
+    routing_tables = network.generate_routing_table()
+    
+    
+    #routing_table_update( routing_tables )
 
-    Start_Server( sys.argv[1], len(network.nodes), routing_tables )
+    #network.buildNetworkTable()  # we need to see how we build our datastructures 
+    
+    #print(network.fileName)
+ 
+    network.dump_network()
+    print("##########################  ROUTING TABLES ####################################\n")
+    print(routing_tables)
+    
+    def add_dead_link( k ):
+        routes_to_remove = [] 
+        for i in range(0,len(routing_tables)):
+            x = -1 
+            route_entry = routing_tables[i]
+            if route_entry[0] == k and route_entry[1] == k:
+                routes_to_remove.append(route_entry)
+            elif route_entry[2] == k and route_entry[0] != k and route_entry[1] != k:
+                routes_to_remove.append(route_entry)
+            elif route_entry[0] == k or route_entry[1] == k:
+                route_entry[2] = -1 
+                route_entry[3] = 9999
+                
+        return routes_to_remove
+    
+    routes_to_remove = add_dead_link(3)
+    
+    for i in routes_to_remove:
+        routing_tables.remove(i)
+        
+        
+    print("\n\n\n")
+    
+    print(routing_tables) 
+        
+
+    
+    
+    
+    print(network.cost_sheet)
+    
+    
+    #Start_Server( sys.argv[1], len(network.nodes), routing_tables )
 
     
     
