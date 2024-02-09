@@ -164,6 +164,9 @@ class NetworkGraph(object):
             else:
                 routing_table.append( [ int(nodes[0]), int(nodes[len(nodes)-1]), int(nodes[1]), self.cost_sheet[nodes[0]+','+nodes[1]] ] )
 
+        for row in self.bad_routes:
+            topology_update_link_dead(row[0], row[1])
+            
         self.routing_tables = routing_table + self.bad_routes
         return self.routing_tables
     
@@ -221,9 +224,45 @@ class NetworkGraph(object):
             
             data =  data.decode('utf-8')
             data = data.split()
+            if data[0].startswith('SWITCH_ALIVE'):
+                mn = int(data[1])
+                if mn in self.dead_links:
+                    topology_update_switch_alive(mn)
+                    self.dead_links.remove(mn)
+                    routing_tables  =  self.generate_routing_table()
+                data=''
+                continue
+            
+            if data[0].startswith('SWITCH_DEAD') or data[0].startswith('LINK_DOWN'):
+                mn = int(data[1])
+                if mn not in self.dead_links:
+                    if data[0].startswith('SWITCH_DEAD'):
+                        topology_update_switch_dead(mn)
+                    self.dead_links.append(mn)
+                    routing_tables  =  self.generate_routing_table()
+                    routing_table_update(routing_tables)
+                    for  nd in self.list_of_registered_switches.values() :
+                        route_update = ['ROUTE_UPDATE']
+                        if int(nd.id) not in self.dead_links:
+                            for row in self.routing_tables:
+                                if ( data[0].startswith('LINK_DOWN') and int(row[2]) == -1):
+                                    topology_update_link_dead(row[0], row[1])
+                                if int(nd.id) == int(row[0]):
+                                    route_update.append([row[0],row[1],row[2]])
+                                if int(nd.id) == int(row[1]) and int(row[2]) == -1:
+                                    route_update.append([row[1],row[0],row[2]])
+                            self.controller_socket.sendto( pickle.dumps(route_update), (nd.addr, nd.port))
+
+                data=''
+                continue
+            
+                            
             network_switch =  NetworkSwitch( data[0].strip(), client_addr[0], client_addr[1])
             self.list_of_registered_switches[data[0].strip()] = network_switch
             register_request_received(network_switch.id)
+            if int(network_switch.id) in self.dead_links:
+                    self.dead_links.remove(mn)
+                    
             register_response = "\r\n"+str(network_switch.id)+"\r\n"
 
             for nd in self.list_of_registered_switches.values():
@@ -234,13 +273,17 @@ class NetworkGraph(object):
             print(f"Acknowledged Register Request for Switch { network_switch.id }")
 
             self.controller_socket.sendto(register_response.encode('UTF-8'), client_addr)
-            print( registered, ' ', self.num_of_switches)
-            if ( registered > self.num_of_switches):
-                for  nd in self.list_of_registered_switches.values() :
+           
+            if ( registered >= self.num_of_switches) :
+                self.generate_routing_table()
+                routing_table_update(self.routing_tables)
+                for nd in self.list_of_registered_switches.values() :
                     route_update = ['ROUTE_UPDATE']
                     for row in self.routing_tables:
                         if int(nd.id) == int(row[0]):
                             route_update.append([row[0],row[1],row[2]])
+                        if int(nd.id) == int(row[1]) and int(row[2]) == -1:
+                            route_update.append([row[1],row[0],row[2]])
                     self.controller_socket.sendto( pickle.dumps(route_update), (nd.addr, nd.port))
 
             
@@ -338,30 +381,7 @@ def write_to_log(log):
         # Write to log
         log_file.writelines(log)
 
-def test_main():
-    #Check for number of arguments and exit if host/port not provided
-    udp = None 
 
-    udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    
-    udp.bind(('', 0))
-
-    host, port =  udp.getsockname()
-
-    print('udp://{host}:{port}'.format(**locals()))
-
-    if udp is not None:
-        print('getting here ')
-        (data, client_addr) = udp.recvfrom(1024) # Client address really is a tuple of (ip_addr, port number) from the sender
-        print(f"Recieved message from client")
-        data =  data.decode('utf-8')
-        print(data)
-
-    if udp is not None:
-        udp.close()
-        print( 'closing the socket')
-    
-    return 
 
 def main():
     
@@ -375,78 +395,18 @@ def main():
     network =  NetworkGraph(sys.argv[2])
     
    
-    routing_tables  =  network.generate_routing_table()
     
-    """network.dump_network()
-
-    print( routing_tables)
-  
-    network.add_dead_link(3)
-
-    routing_tables  =  network.generate_routing_table()
-    
-
-    print("\n\n\n")
-
-    routing_tables  =  network.generate_routing_table()"""
-    
-
+    network.generate_routing_table()
     network.dump_network()
-    print( routing_tables)
-    routing_table_update( routing_tables)
-
+    #print( routing_tables)
+    
     network.Start_Server( int(sys.argv[1]))
   
-   
     return
     
-    print("The raw lines" ,network.raw_lines)
-    #network.remove_dead_link(3)
-    
-    
-    print( "The Nodes ", network.nodes )
-    
-    #network.remove_dead_link(3)
-    
-    print(network.cost_sheet) 
-    
-    routing_tables = network.generate_routing_table()
     
     
     
-    #routing_table_update( routing_tables )
-
-    #network.buildNetworkTable()  # we need to see how we build our datastructures 
-    
-    #print(network.fileName)
- 
-    network.dump_network()
-    print("##########################  ROUTING TABLES ####################################\n")
-    print(routing_tables)
-    
-    process_dead_links( routing_tables , 3)
-        
-        
-    print("\n\n\n")
-    
-    for bd_rte in network.bad_routes:
-        routing_tables.append(bd_rte)
-
-    print(routing_tables) 
-        
-
-    
-    
-    
-    print(network.cost_sheet)
-    
-    
-    #Start_Server( sys.argv[1], len(network.nodes), routing_tables )
-
-    
-    
-    # Write your code below or elsewhere in this file
-
 if __name__ == "__main__":
     main()
 
