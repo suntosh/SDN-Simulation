@@ -7,7 +7,7 @@ Last Modified Date: December 9th, 2021
 """
 
 import sys
-import socket, pickle
+import socket, pickle, time, os
 from datetime import date, datetime
 
 # Please do not modify the name of the log file, otherwise you will lose points because the grader won't be able to find your log file
@@ -70,17 +70,29 @@ class NetworkGraph(object):
         self.cost_sheet = {} 
         self.raw_lines = None 
         self.bad_routes = []
-        self.num_nodes = 0
+        self.num_of_switches = 0
         self.active_nodes = 0 
         self.list_of_registered_switches = {}
         self.controller_socket = None 
+        self.dead_links = []
+        self.routing_tables = None
     
-    def buildNetworkTable(self, dead_links):
-        with open(self.fileName) as f:
-            self.raw_lines = f.readlines()
-            print(self.raw_lines)
-            f.close()
-        
+    def reset_structures(self):
+        self.network_table.clear()
+        self.switch_nodes.clear()
+        self.cost_sheet.clear()
+        self.bad_routes.clear()
+        self.nodes.clear()
+    
+
+    def buildNetworkTable(self):
+        self.reset_structures()
+        if self.raw_lines is None:
+            with open(self.fileName) as f:
+                self.raw_lines = f.readlines()
+                print(self.raw_lines)
+                f.close()
+            
         for line in self.raw_lines:
             src = None
             dest = None
@@ -88,19 +100,20 @@ class NetworkGraph(object):
             #print(' this line ', line)
             line = line.strip()
             if ( len(line) == 1 ):
-                self.num_nodes = int(line)
+                self.num_of_switches = int(line)
                 continue
             process = True
             route = line.split() # Eliminating broken links 
             src = int(route[0])
             dest = int(route[1])
             cost = int(route[2]) 
-            for d in dead_links:
+            for d in self.dead_links:
                 if d == src or d == dest:
                     process = False
-                if ( process == False ):
-                    self.bad_routes.append( [src, dest , -1 , 9999] )
-                    continue
+            if ( process == False ):
+                self.bad_routes.append( [src, dest , -1 , 9999] )
+                continue
+
             #print('Them raw lines ', line)
             rte = Route( src, dest, cost  )
             self.network_table.append( rte )
@@ -151,7 +164,8 @@ class NetworkGraph(object):
             else:
                 routing_table.append( [ int(nodes[0]), int(nodes[len(nodes)-1]), int(nodes[1]), self.cost_sheet[nodes[0]+','+nodes[1]] ] )
 
-        return routing_table
+        self.routing_tables = routing_table + self.bad_routes
+        return self.routing_tables
     
     def recursive_graph_pathing(self, src, dest , hops, path, cost):
         node = self.switch_nodes[src]
@@ -178,16 +192,12 @@ class NetworkGraph(object):
         for route in self.network_table:
             print(route)
             
-    def dump_nodes_neighbours(self):
-        for k in self.switch_nodes:
-            print(self.switch_nodes[k]) 
-        self.dispatch_neighbour_addresses()
-            
-    
     def dispatch_switch_addresses(self):
         for k in self.list_of_registered_switches.values():
-            self.server_socket.sendto( pickle.dumps([['LOCATIONS'],self.list_of_registered_switches]), ( k.addr , k.port))
+            self.controller_socket.sendto( pickle.dumps(['LOCATIONS',self.list_of_registered_switches]), ( k.addr , k.port))
     
+    def add_dead_link(self, bl):
+        self.dead_links.append(bl) 
 
     def Start_Server(self, port):
     
@@ -201,6 +211,7 @@ class NetworkGraph(object):
         
         registered = 0; 
         
+        print("started process", os.getpid())
 
         while True:
 
@@ -224,20 +235,19 @@ class NetworkGraph(object):
 
             self.controller_socket.sendto(register_response.encode('UTF-8'), client_addr)
             print( registered, ' ', self.num_of_switches)
-            if ( registered == self.num_of_switches):
+            if ( registered > self.num_of_switches):
                 for  nd in self.list_of_registered_switches.values() :
-                    route_update = []
+                    route_update = ['ROUTE_UPDATE']
                     for row in self.routing_tables:
                         if int(nd.id) == int(row[0]):
                             route_update.append([row[0],row[1],row[2]])
                     self.controller_socket.sendto( pickle.dumps(route_update), (nd.addr, nd.port))
-                    
-                for  nd in self.list_of_registered_switches.values() :
-                    neighbour_locations = []
-                    for row in self.routing_tables:
-                        if int(nd.id) == int(row[0]):
-                            neighbour_locations.append([row[0],row[1],row[2]])
-                    self.controller_socket.sendto( pickle.dumps(route_update), (nd.addr, nd.port))
+
+            
+
+                self.dispatch_switch_addresses()
+
+                
             
                     
 def register_request_received(switch_id):
@@ -328,32 +338,6 @@ def write_to_log(log):
         # Write to log
         log_file.writelines(log)
 
-def process_dead_links( routing_tables, k ):
-        routes_to_remove = [] 
-        for i in range(0,len( routing_tables)):
-            route_entry = routing_tables[i]
-            if route_entry[0] == k and route_entry[1] == k:
-                routes_to_remove.append(route_entry)
-            elif route_entry[2] == k and route_entry[0] != k and route_entry[1] != k:
-                routes_to_remove.append(route_entry)
-            elif route_entry[0] == k or route_entry[1] == k:
-                route_entry[2] = -1 
-                route_entry[3] = 9999
-                
-        for i in routes_to_remove:
-            routing_tables.remove(i)
-        
-
-
-
-
-
-def open_ephemeral_socket( udp ):
-    udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    
-    udp.bind(('', 0))
-    return udp.getsockname()
-
 def test_main():
     #Check for number of arguments and exit if host/port not provided
     udp = None 
@@ -389,12 +373,31 @@ def main():
 
     print(sys.argv)
     network =  NetworkGraph(sys.argv[2])
-    #routing_tables  =  network.generate_routing_table()
     
+   
+    routing_tables  =  network.generate_routing_table()
     
+    """network.dump_network()
+
+    print( routing_tables)
+  
+    network.add_dead_link(3)
+
+    routing_tables  =  network.generate_routing_table()
     
-    network.buildNetworkTable([])
-    network.dump_nodes_neighbours()
+
+    print("\n\n\n")
+
+    routing_tables  =  network.generate_routing_table()"""
+    
+
+    network.dump_network()
+    print( routing_tables)
+    routing_table_update( routing_tables)
+
+    network.Start_Server( int(sys.argv[1]))
+  
+   
     return
     
     print("The raw lines" ,network.raw_lines)
