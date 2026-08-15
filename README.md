@@ -1,7 +1,70 @@
 # SDN Simulation — ECE 50863 Lab Project 1
 
-Python 3.8+, standard library only. No install step.
-[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+A software-defined network simulated as a set of communicating UNIX processes: one
+**controller** and *N* **switches**, all speaking UDP over loopback.
+
+Python 3.8+, standard library only. No install step.[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
+## The problem
+
+Software-defined networking separates the *control plane* (deciding where traffic
+should go) from the *data plane* (forwarding it). In a traditional network every
+router runs a distributed routing protocol and negotiates paths with its peers.
+In SDN, a single logically centralized controller holds the whole topology,
+computes the routes, and pushes forwarding tables down to dumb switches.
+
+This project implements that control plane. It does **not** forward user traffic —
+there are no packets being routed. What is simulated is the harder and more
+interesting half: how the controller learns the topology, how it detects failures,
+and how quickly and correctly it reconverges.
+
+### What the system has to do
+
+**1. Topology bootstrap.** The controller reads a static graph file — a switch
+count followed by weighted undirected edges — but it does not know where the
+switches actually *are*. Each switch starts independently, sends a registration
+request, and the controller learns its address from the datagram source. Once all
+*N* have registered, the controller computes routes and pushes them out. Each
+switch also needs the addresses of its neighbours, which only the controller knows.
+
+**2. Shortest-path routing.** For every ordered pair of switches the controller
+computes the minimum-cost path and derives a forwarding entry: *from this switch,
+to reach that destination, send to this next hop*. The next hop is the first edge
+on the shortest path, which is not necessarily the destination itself even when a
+direct link exists — a 100-cost direct link loses to a two-hop path costing 2.
+Unreachable pairs are reported as next hop `-1`, distance `9999`.
+
+**3. Failure detection.** Switches exchange keep-alive messages with their
+neighbours every *K* seconds. A neighbour that goes silent for `3 * K` seconds is
+declared dead and reported to the controller, which removes it from the topology
+and pushes updated tables to everyone still alive. Two distinct failure modes have
+to be handled separately:
+
+- **Switch death** — the whole node is gone. Every edge incident on it disappears,
+  and the routing table no longer contains any row *originating* from it.
+- **Link failure** (the `-f` flag) — a single edge is down but both endpoints are
+  healthy. Traffic must reroute around the failed link while both switches remain
+  reachable.
+
+**4. Recovery.** A restarted switch re-registers, the controller marks it alive,
+and the network reconverges. A partitioned topology — where some pairs genuinely
+have no path — must be handled without crashing, since partition is the normal
+outcome of killing an articulation point.
+
+**5. Logging.** Correctness is graded from `Controller.log` and `switch<N>.log`
+against a fixed format. See `SampleLog/` for the reference output. The log formats
+in the source are load-bearing — do not reformat them.
+
+### Why it's non-trivial
+
+Every hard part is a distributed-systems problem rather than a graph-theory one.
+UDP is unordered and lossy, so a route update can arrive before the registration
+response it logically follows. Failure detection is a timing problem: detect too
+eagerly and the network flaps, too slowly and the graded convergence window is
+missed — and the detector cannot be driven by inbound traffic, because the failure
+case *is* the absence of inbound traffic. Equal-cost paths must break ties
+deterministically or the graded output differs run to run. And every switch is
+mutating shared state from two threads at once.
 
 ## Run
 
