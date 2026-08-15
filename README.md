@@ -1,5 +1,4 @@
-# SDN Simulation — ECE 50863 Lab Project 1
-
+# SDN Simulation — ECE 50863
 A software-defined network simulated as a set of communicating UNIX processes: one
 **controller** and *N* **switches**, all speaking UDP over loopback.
 
