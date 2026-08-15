@@ -1,4 +1,4 @@
-# SDN Simulation — ECE 50863 
+# SDN Simulation - ECE 50863 
 
 
 [![CI](https://github.com/suntosh/SDN-Simulation/actions/workflows/ci.yml/badge.svg)](https://github.com/suntosh/SDN-Simulation/actions/workflows/ci.yml) 
