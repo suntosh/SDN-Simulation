@@ -1,6 +1,7 @@
 # SDN Simulation — ECE 50863 Lab Project 1
 
 Python 3.8+, standard library only. No install step.
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 ## Run
 
