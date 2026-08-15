@@ -1,8 +1,11 @@
-# SDN Simulation @ ECE 50863
+# SDN Simulation — ECE 50863 Lab Project 1
+
+[![CI](https://github.com/suntosh/SDN-Simulation/actions/workflows/ci.yml/badge.svg)](https://github.com/suntosh/SDN-Simulation/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE) ![Python](https://img.shields.io/badge/Python-3.8%2B-3776AB?logo=python&logoColor=white) ![Tests](https://img.shields.io/badge/tests-10%20unit%20%2B%2010%20integration-brightgreen) ![Dependencies](https://img.shields.io/badge/dependencies-none-success) ![Transport](https://img.shields.io/badge/transport-UDP-informational) ![Routing](https://img.shields.io/badge/routing-Dijkstra-informational) ![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)
+
 A software-defined network simulated as a set of communicating UNIX processes: one
 **controller** and *N* **switches**, all speaking UDP over loopback.
 
-Python 3.8+, standard library only. No install step.[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+Python 3.8+, standard library only. No install step.
 
 ## The problem
 
@@ -111,9 +114,20 @@ python3 SwitchRunner.py 127.0.0.1 3999 --config Config/graph_3.txt -f 0 1
 
 ### Tests
 
+Unit tests — routing math on a static topology:
+
 ```bash
 python3 -m unittest Tests -v
 ```
+
+Integration test — spawns a real controller and three real switches, kills one,
+and asserts the logs against the graded format through failure and recovery:
+
+```bash
+python3 integration_test.py
+```
+
+Both run in CI on Windows, Linux and macOS across Python 3.8 / 3.10 / 3.12.
 
 ## Output
 
