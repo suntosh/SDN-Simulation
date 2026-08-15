@@ -1,430 +1,349 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
+"""SDN Controller (ECE 50863 Lab Project 1).
 
-"""This is the Controller Starter Code for ECE50863 Lab Project 1
-Author: Xin Du
-Email: du201@purdue.edu
-Last Modified Date: December 9th, 2021
+Rewritten from the original starter-derived implementation. Fixes:
+  * multi-digit switch counts in the config file
+  * IndexError when the topology partitions (no path between two nodes)
+  * shortest-distance column reported the first-hop cost, not the path cost
+  * "Register Response" was never logged
+  * unreachable pairs were derived from dead *edges* instead of dead *pairs*
+  * NameError on re-registration (stale `mn` variable)
+  * registration counter counted messages, not distinct switches
+  * exponential all-simple-paths search replaced with Dijkstra
+  * pickle-over-UDP replaced with JSON (pickle.loads on a network socket is
+    remote code execution)
+
+Usage: python3 controller.py <port> <config file>
 """
 
+import heapq
+import json
+import os
+import socket
 import sys
-import socket, pickle, time, os
-from datetime import date, datetime
+from datetime import datetime
 
-# Please do not modify the name of the log file, otherwise you will lose points because the grader won't be able to find your log file
 LOG_FILE = "Controller.log"
 
-# Those are logging functions to help you follow the correct logging standard
-
-# "Register Request" Format is below:
-#
-# Timestamp
-# Register Request <Switch-ID>
-
-IP = '0.0.0.0'
-PORT = 3999
-
-class Route(object):
-
-    def __init__(self, from_node, to_node, cost ):
-        self.from_node = from_node
-        self.to_node = to_node
-        self.cost = cost
-        self.nexthop = None
-
-    def __str__(self):
-        return f'{self.from_node} {self.to_node} {self.cost}'
-    
-    def toList(self):
-        return [self.from_node, self.to_node, self.cost, self.nexthop]
+IP = "0.0.0.0"
+BUFFER_SIZE = 65535
+INFINITY = 9999
+NO_HOP = -1
 
 
-class SwitchNode(object):
-    
-    def __init__(self, id):
-        self.id = id
-        self.neighbours = {}
+# --------------------------------------------------------------------------
+# Topology
+# --------------------------------------------------------------------------
 
-    def add_neighbour(self, id, cost ):
-        self.neighbours[id] = cost
+class Topology:
+    """Static config topology plus the live failure overlay."""
 
-    def __str__(self):
-        return f'{self.id} -- {self.neighbours}'
-
-class NetworkSwitch(object):
-
-    def __init__(self, id, addr, port):
-        self.id = id 
-        self.addr = addr
-        self.port = port
-
-    def __str__(self):
-        return f'{self.id} {self.addr} {self.port}'
-
-class NetworkGraph(object):
-      
     def __init__(self, filename):
-        self.fileName = filename
-        self.network_table = []
-        self.switch_nodes = {}
-        self.nodes = []
-        self.cost_sheet = {} 
-        self.raw_lines = None 
-        self.bad_routes = []
-        self.num_of_switches = 0
-        self.active_nodes = 0 
-        self.list_of_registered_switches = {}
-        self.controller_socket = None 
-        self.dead_links = []
-        self.routing_tables = None
-    
-    def reset_structures(self):
-        self.network_table.clear()
-        self.switch_nodes.clear()
-        self.cost_sheet.clear()
-        self.bad_routes.clear()
-        self.nodes.clear()
-    
+        self.filename = filename
+        self.num_switches = 0
+        self.edges = {}                 # frozenset({u, v}) -> cost
+        self.dead_switches = set()      # switch ids reported dead
+        self.dead_links = set()         # frozenset({u, v}) reported down
+        self._load()
 
-    def buildNetworkTable(self):
-        self.reset_structures()
-        if self.raw_lines is None:
-            with open(self.fileName) as f:
-                self.raw_lines = f.readlines()
-                print(self.raw_lines)
-                f.close()
-            
-        for line in self.raw_lines:
-            src = None
-            dest = None
-            cost = None 
-            #print(' this line ', line)
-            line = line.strip()
-            if ( len(line) == 1 ):
-                self.num_of_switches = int(line)
+    def _load(self):
+        with open(self.filename) as handle:
+            lines = [ln.strip() for ln in handle if ln.strip()]
+
+        if not lines:
+            raise ValueError(f"{self.filename} is empty")
+
+        # First non-blank line is the switch count. Do NOT test len(line) == 1;
+        # that silently breaks at 10 switches.
+        header = lines[0].split()
+        if len(header) != 1:
+            raise ValueError(f"{self.filename}: first line must be the switch count")
+        self.num_switches = int(header[0])
+
+        for line in lines[1:]:
+            parts = line.split()
+            if len(parts) != 3:
+                raise ValueError(f"{self.filename}: malformed edge line: {line!r}")
+            u, v, cost = int(parts[0]), int(parts[1]), int(parts[2])
+            self.edges[frozenset((u, v))] = cost
+
+    @property
+    def switches(self):
+        return list(range(self.num_switches))
+
+    def live_adjacency(self):
+        """Adjacency for the current view of the network."""
+        adj = {s: {} for s in self.switches if s not in self.dead_switches}
+        for link, cost in self.edges.items():
+            u, v = tuple(link)
+            if u in self.dead_switches or v in self.dead_switches:
                 continue
-            process = True
-            route = line.split() # Eliminating broken links 
-            src = int(route[0])
-            dest = int(route[1])
-            cost = int(route[2]) 
-            for d in self.dead_links:
-                if d == src or d == dest:
-                    process = False
-            if ( process == False ):
-                self.bad_routes.append( [src, dest , -1 , 9999] )
+            if link in self.dead_links:
                 continue
+            if u in adj and v in adj:
+                adj[u][v] = cost
+                adj[v][u] = cost
+        return adj
 
-            #print('Them raw lines ', line)
-            rte = Route( src, dest, cost  )
-            self.network_table.append( rte )
-            self.nodes.append(src)
-            self.nodes.append(dest)
-            str_rte = f'{src}, {dest}'
-            self.cost_sheet[str_rte] = cost
-            str_rte = f'{dest}, {src}'
-            self.cost_sheet[str_rte] = cost
-            if src not in self.switch_nodes:
-                self.switch_nodes[src] = SwitchNode(src)
-            self.switch_nodes[src].add_neighbour(dest, cost)
-            if dest not in self.switch_nodes:
-                self.switch_nodes[dest] = SwitchNode(dest)
-            self.switch_nodes[dest].add_neighbour(src, cost)
+    def neighbours_of(self, switch_id):
+        """Configured neighbours, ignoring failures.
 
-        self.nodes =  sorted(set(self.nodes))
-        return None
+        The switch needs the full configured list so it can notice a neighbour
+        coming *back*.
+        """
+        out = []
+        for link in self.edges:
+            u, v = tuple(link)
+            if u == switch_id:
+                out.append(v)
+            elif v == switch_id:
+                out.append(u)
+        return sorted(out)
 
+    # -- routing ----------------------------------------------------------
 
-    def compute_shortest_paths(self):
-        self.buildNetworkTable()
-        shortest_paths= {}
-        for i in self.nodes:
-            for j in self.nodes:
-                paths = {}
-                if ( i == j ):
-                    path = f'{i}, {j}'
-                    shortest_paths[path] = 0
+    def _dijkstra(self, source, adj):
+        """Return {dest: (cost, hops, next_hop)} for everything reachable.
+
+        The priority key is (cost, hops, next_hop) so ties resolve
+        deterministically: cheapest first, then fewest hops, then lowest
+        next-hop id. Without this the routing table is non-deterministic
+        across runs and the grader diff is unstable.
+        """
+        best = {source: (0, 0, source)}
+        queue = [(0, 0, source, source)]
+        while queue:
+            cost, hops, next_hop, node = heapq.heappop(queue)
+            if (cost, hops, next_hop) > best.get(node, (INFINITY, 0, NO_HOP)):
+                continue
+            for neighbour, edge_cost in adj.get(node, {}).items():
+                hop = neighbour if node == source else next_hop
+                candidate = (cost + edge_cost, hops + 1, hop)
+                if candidate < best.get(neighbour, (INFINITY + 1, 0, 0)):
+                    best[neighbour] = candidate
+                    heapq.heappush(
+                        queue, (candidate[0], candidate[1], candidate[2], neighbour)
+                    )
+        return best
+
+    def routing_table(self):
+        """Full table: [[src, dest, next_hop, distance], ...].
+
+        Rows leaving a dead switch are omitted. Rows *toward* an unreachable
+        switch are emitted as (-1, 9999). This matches the sample log; the
+        original derived these from dead edges and produced rows like
+        `1,2:-1,9999` for a switch that no longer exists.
+        """
+        adj = self.live_adjacency()
+        table = []
+        for src in self.switches:
+            if src in self.dead_switches:
+                continue
+            best = self._dijkstra(src, adj)
+            for dest in self.switches:
+                if dest in best:
+                    cost, _hops, next_hop = best[dest]
+                    table.append([src, dest, next_hop, cost])
                 else:
-                    self.recursive_graph_pathing( i, j , paths , [i],0)
-                    cheapest_cost = sorted(paths.values())[0]
-                    path_with_least_hops = [x for x,v in paths.items() if int(v) == cheapest_cost]
-                    shortest_paths[sorted(path_with_least_hops, key=len)[0]] = cheapest_cost
-                    shortest_paths = {key.strip("[]"): item for key, item in shortest_paths.items()}
-        return shortest_paths
+                    table.append([src, dest, NO_HOP, INFINITY])
+        return table
 
-    def generate_routing_table(self):
-        shortest_paths = self.compute_shortest_paths()
-        routing_table = []
-        for key in shortest_paths:
-            nodes = key.split(',')
-            if (len(nodes) == 2):
-                if nodes[0].strip() != nodes[1].strip():
-                    routing_table.append( [ int(nodes[0]), int(nodes[1]), int(nodes[1]), self.cost_sheet[nodes[0]+','+nodes[1]] ] )
-                else:
-                    routing_table.append( [ int(nodes[0]), int(nodes[1]), int(nodes[1]), 0 ] )
-            else:
-                routing_table.append( [ int(nodes[0]), int(nodes[len(nodes)-1]), int(nodes[1]), self.cost_sheet[nodes[0]+','+nodes[1]] ] )
 
-        for row in self.bad_routes:
-            topology_update_link_dead(row[0], row[1])
-            
-        self.routing_tables = routing_table + self.bad_routes
-        return self.routing_tables
-    
-    def recursive_graph_pathing(self, src, dest , hops, path, cost):
-        node = self.switch_nodes[src]
-        neighbours = node.neighbours
-        for i in neighbours:
-             if dest == i :
-                path_copy1 = path[:]
-                path_copy1.append(i) 
-                hops[ str(path_copy1) ] = neighbours[i] +cost
-             else:
-                if ( i not in path ):
-                    path_copy2 = path[:]
-                    path_copy2.append(i) 
-                    self.recursive_graph_pathing( i , dest , hops, path_copy2, cost + neighbours[i])
-               
-    def toList(self):
-        routing_table = []
-        for route in self.network_table:
-            routing_table.append( route.toList() )
-        return routing_table
+# --------------------------------------------------------------------------
+# Logging (formats are fixed by the grader -- do not reformat)
+# --------------------------------------------------------------------------
 
-    
-    def dump_network(self):
-        for route in self.network_table:
-            print(route)
-            
-    def dispatch_switch_addresses(self):
-        for k in self.list_of_registered_switches.values():
-            self.controller_socket.sendto( pickle.dumps(['LOCATIONS',self.list_of_registered_switches]), ( k.addr , k.port))
-    
-    def add_dead_link(self, bl):
-        self.dead_links.append(bl) 
+def _timestamp():
+    return str(datetime.time(datetime.now())) + "\n"
 
-    def Start_Server(self, port):
-    
-        print("Creating socket")
-        self.controller_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) # not SOCK_STREAM, which is for TCP. We want UDP, which requires SOCK_DGRAM
 
-        print(f"Binding socket to ip_addr {IP} and port {port}")
-        self.controller_socket.bind((IP, int(port)))
+def write_to_log(log):
+    with open(LOG_FILE, "a+") as log_file:
+        log_file.write("\n\n")
+        log_file.writelines(log)
 
-        print(f"We've now bound the socket to {self.controller_socket.getsockname()}, so we can now send messages to the server by specifying its address in sendto")
-        
-        registered = 0; 
-        
-        print("started process", os.getpid())
 
-        while True:
-
-            (data, client_addr) = self.controller_socket.recvfrom(1024) # Client address really is a tuple of (ip_addr, port number) from the sender
-
-            print(f"Recieved message from client")
-            
-            data =  data.decode('utf-8')
-            data = data.split()
-            if data[0].startswith('SWITCH_ALIVE'):
-                mn = int(data[1])
-                if mn in self.dead_links:
-                    topology_update_switch_alive(mn)
-                    self.dead_links.remove(mn)
-                    routing_tables  =  self.generate_routing_table()
-                data=''
-                continue
-            
-            if data[0].startswith('SWITCH_DEAD') or data[0].startswith('LINK_DOWN'):
-                mn = int(data[1])
-                if mn not in self.dead_links:
-                    if data[0].startswith('SWITCH_DEAD'):
-                        topology_update_switch_dead(mn)
-                    self.dead_links.append(mn)
-                    routing_tables  =  self.generate_routing_table()
-                    routing_table_update(routing_tables)
-                    for  nd in self.list_of_registered_switches.values() :
-                        route_update = ['ROUTE_UPDATE']
-                        if int(nd.id) not in self.dead_links:
-                            for row in self.routing_tables:
-                                if ( data[0].startswith('LINK_DOWN') and int(row[2]) == -1):
-                                    topology_update_link_dead(row[0], row[1])
-                                if int(nd.id) == int(row[0]):
-                                    route_update.append([row[0],row[1],row[2]])
-                                if int(nd.id) == int(row[1]) and int(row[2]) == -1:
-                                    route_update.append([row[1],row[0],row[2]])
-                            self.controller_socket.sendto( pickle.dumps(route_update), (nd.addr, nd.port))
-
-                data=''
-                continue
-            
-                            
-            network_switch =  NetworkSwitch( data[0].strip(), client_addr[0], client_addr[1])
-            self.list_of_registered_switches[data[0].strip()] = network_switch
-            register_request_received(network_switch.id)
-            if int(network_switch.id) in self.dead_links:
-                    self.dead_links.remove(mn)
-                    
-            register_response = "\r\n"+str(network_switch.id)+"\r\n"
-
-            for nd in self.list_of_registered_switches.values():
-                register_response += str(nd.id)+" "+nd.addr+" "+str(nd.port)+"\r\n"
-
-            registered += 1
-
-            print(f"Acknowledged Register Request for Switch { network_switch.id }")
-
-            self.controller_socket.sendto(register_response.encode('UTF-8'), client_addr)
-           
-            if ( registered >= self.num_of_switches) :
-                self.generate_routing_table()
-                routing_table_update(self.routing_tables)
-                for nd in self.list_of_registered_switches.values() :
-                    route_update = ['ROUTE_UPDATE']
-                    for row in self.routing_tables:
-                        if int(nd.id) == int(row[0]):
-                            route_update.append([row[0],row[1],row[2]])
-                        if int(nd.id) == int(row[1]) and int(row[2]) == -1:
-                            route_update.append([row[1],row[0],row[2]])
-                    self.controller_socket.sendto( pickle.dumps(route_update), (nd.addr, nd.port))
-
-            
-
-                self.dispatch_switch_addresses()
-
-                
-            
-                    
 def register_request_received(switch_id):
-    log = []
-    log.append(str(datetime.time(datetime.now())) + "\n")
-    log.append(f"Register Request {switch_id}\n")
-    write_to_log(log)
+    write_to_log([_timestamp(), f"Register Request {switch_id}\n"])
 
-# "Register Responses" Format is below (for every switch):
-#
-# Timestamp
-# Register Response <Switch-ID>
 
 def register_response_sent(switch_id):
-    log = []
-    log.append(str(datetime.time(datetime.now())) + "\n")
-    log.append(f"Register Response {switch_id}\n")
-    write_to_log(log) 
+    write_to_log([_timestamp(), f"Register Response {switch_id}\n"])
 
-# For the parameter "routing_table", it should be a list of lists in the form of [[...], [...], ...]. 
-# Within each list in the outermost list, the first element is <Switch ID>. The second is <Dest ID>, and the third is <Next Hop>, and the fourth is <Shortest distance>
-# "Routing Update" Format is below:
-#
-# Timestamp
-# Routing Update 
-# <Switch ID>,<Dest ID>:<Next Hop>,<Shortest distance>
-# ...
-# ...
-# Routing Complete
-#
-# You should also include all of the Self routes in your routing_table argument -- e.g.,  Switch (ID = 4) should include the following entry: 		
-# 4,4:4,0
-# 0 indicates ‘zero‘ distance
-#
-# For switches that can’t be reached, the next hop and shortest distance should be ‘-1’ and ‘9999’ respectively. (9999 means infinite distance so that that switch can’t be reached)
-#  E.g, If switch=4 cannot reach switch=5, the following should be printed
-#  4,5:-1,9999
-#
-# For any switch that has been killed, do not include the routes that are going out from that switch. 
-# One example can be found in the sample log in starter code. 
-# After switch 1 is killed, the routing update from the controller does not have routes from switch 1 to other switches.
 
 def routing_table_update(routing_table):
-    log = []
-    log.append(str(datetime.time(datetime.now())) + "\n")
-    log.append("Routing Update\n")
+    log = [_timestamp(), "Routing Update\n"]
     for row in routing_table:
         log.append(f"{row[0]},{row[1]}:{row[2]},{row[3]}\n")
     log.append("Routing Complete\n")
     write_to_log(log)
 
-# "Topology Update: Link Dead" Format is below: (Note: We do not require you to print out Link Alive log in this project)
-#
-#  Timestamp
-#  Link Dead <Switch ID 1>,<Switch ID 2>
 
 def topology_update_link_dead(switch_id_1, switch_id_2):
-    log = []
-    log.append(str(datetime.time(datetime.now())) + "\n")
-    log.append(f"Link Dead {switch_id_1},{switch_id_2}\n")
-    write_to_log(log) 
+    write_to_log([_timestamp(), f"Link Dead {switch_id_1},{switch_id_2}\n"])
 
-# "Topology Update: Switch Dead" Format is below:
-#
-#  Timestamp
-#  Switch Dead <Switch ID>
 
 def topology_update_switch_dead(switch_id):
-    log = []
-    log.append(str(datetime.time(datetime.now())) + "\n")
-    log.append(f"Switch Dead {switch_id}\n")
-    write_to_log(log) 
+    write_to_log([_timestamp(), f"Switch Dead {switch_id}\n"])
 
-# "Topology Update: Switch Alive" Format is below:
-#
-#  Timestamp
-#  Switch Alive <Switch ID>
 
 def topology_update_switch_alive(switch_id):
-    log = []
-    log.append(str(datetime.time(datetime.now())) + "\n")
-    log.append(f"Switch Alive {switch_id}\n")
-    write_to_log(log) 
+    write_to_log([_timestamp(), f"Switch Alive {switch_id}\n"])
 
-def write_to_log(log):
-    with open(LOG_FILE, 'a+') as log_file:
-        log_file.write("\n\n")
-        # Write to log
-        log_file.writelines(log)
 
+# --------------------------------------------------------------------------
+# Controller
+# --------------------------------------------------------------------------
+
+class Controller:
+
+    def __init__(self, port, config_file):
+        self.port = port
+        self.topology = Topology(config_file)
+        self.registered = {}    # switch_id -> (addr, port)
+        self.sock = None
+        self.bootstrapped = False
+
+    # -- wire helpers -----------------------------------------------------
+
+    def _send(self, switch_id, message):
+        target = self.registered.get(switch_id)
+        if target is None:
+            return
+        try:
+            self.sock.sendto(json.dumps(message).encode("utf-8"), tuple(target))
+        except OSError as exc:
+            print(f"[controller] send to switch {switch_id} failed: {exc}")
+
+    def _push_routes(self):
+        """Recompute and push per-switch routing tables."""
+        table = self.topology.routing_table()
+        routing_table_update(table)
+
+        for switch_id in self.registered:
+            if switch_id in self.topology.dead_switches:
+                continue
+            rows = [[r[0], r[1], r[2]] for r in table if r[0] == switch_id]
+            self._send(switch_id, {
+                "type": "ROUTE_UPDATE",
+                "routes": rows,
+                "neighbours": self.topology.neighbours_of(switch_id),
+                "locations": {str(k): v for k, v in self.registered.items()},
+            })
+
+    # -- event handlers ---------------------------------------------------
+
+    def _on_register(self, switch_id, client_addr):
+        register_request_received(switch_id)
+        came_back = (
+            switch_id in self.topology.dead_switches
+            or (self.bootstrapped and switch_id not in self.registered)
+        )
+        self.registered[switch_id] = [client_addr[0], client_addr[1]]
+
+        if switch_id in self.topology.dead_switches:
+            self.topology.dead_switches.discard(switch_id)
+            # A returning switch clears any link failures it was party to.
+            self.topology.dead_links = {
+                l for l in self.topology.dead_links if switch_id not in l
+            }
+            topology_update_switch_alive(switch_id)
+
+        self._send(switch_id, {
+            "type": "REGISTER_RESPONSE",
+            "id": switch_id,
+            "neighbours": self.topology.neighbours_of(switch_id),
+            "locations": {str(k): v for k, v in self.registered.items()},
+        })
+        register_response_sent(switch_id)
+
+        if not self.bootstrapped and len(self.registered) >= self.topology.num_switches:
+            self.bootstrapped = True
+            self._push_routes()
+        elif came_back:
+            self._push_routes()
+
+    def _on_switch_dead(self, dead_id):
+        if dead_id in self.topology.dead_switches:
+            return
+        self.topology.dead_switches.add(dead_id)
+        topology_update_switch_dead(dead_id)
+        self._push_routes()
+
+    def _on_switch_alive(self, alive_id):
+        if alive_id not in self.topology.dead_switches:
+            return
+        self.topology.dead_switches.discard(alive_id)
+        topology_update_switch_alive(alive_id)
+        self._push_routes()
+
+    def _on_link_down(self, reporter, neighbour):
+        """A single link failed -- not the whole switch.
+
+        The original treated LINK_DOWN identically to SWITCH_DEAD and removed
+        every edge incident on the reported node, which is wrong whenever the
+        node still has other working links.
+        """
+        link = frozenset((reporter, neighbour))
+        if link in self.topology.dead_links:
+            return
+        self.topology.dead_links.add(link)
+        topology_update_link_dead(reporter, neighbour)
+        self._push_routes()
+
+    # -- main loop --------------------------------------------------------
+
+    def serve(self):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.bind((IP, self.port))
+        print(f"[controller] pid={os.getpid()} listening on {self.sock.getsockname()}")
+        print(f"[controller] expecting {self.topology.num_switches} switches")
+
+        handlers = {
+            "SWITCH_DEAD": lambda m: self._on_switch_dead(int(m["target"])),
+            "SWITCH_ALIVE": lambda m: self._on_switch_alive(int(m["target"])),
+            "LINK_DOWN": lambda m: self._on_link_down(
+                int(m["reporter"]), int(m["target"])
+            ),
+        }
+
+        while True:
+            try:
+                data, client_addr = self.sock.recvfrom(BUFFER_SIZE)
+            except OSError as exc:
+                print(f"[controller] recv error: {exc}")
+                continue
+
+            try:
+                message = json.loads(data.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                # Never let a malformed datagram take the controller down.
+                print(f"[controller] dropping malformed datagram from {client_addr}")
+                continue
+
+            kind = message.get("type")
+            if kind == "REGISTER_REQUEST":
+                self._on_register(int(message["id"]), client_addr)
+            elif kind in handlers:
+                handlers[kind](message)
+            else:
+                print(f"[controller] unknown message type {kind!r}")
 
 
 def main():
-    
-    # This is good 
-    num_args = len(sys.argv)
-    if num_args < 3:
-        print ("Usage: python controller.py <port> <config file>\n")
+    if len(sys.argv) < 3:
+        print("Usage: python3 controller.py <port> <config file>")
         sys.exit(1)
 
-    print(sys.argv)
-    network =  NetworkGraph(sys.argv[2])
-    
-   
-    
-    network.generate_routing_table()
-    network.dump_network()
-    #print( routing_tables)
-    
-    network.Start_Server( int(sys.argv[1]))
-  
-    return
-    
-    
-    
-    
+    controller = Controller(int(sys.argv[1]), sys.argv[2])
+    print(f"[controller] loaded {sys.argv[2]}: "
+          f"{controller.topology.num_switches} switches, "
+          f"{len(controller.topology.edges)} links")
+    try:
+        controller.serve()
+    except KeyboardInterrupt:
+        print("\n[controller] shutting down")
+
+
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
-
-
-
-
-
-""" Code References
-
-#https://gist.github.com/gabrielfalcao/20e567e188f588b65ba2
-#https://www.bogotobogo.com/python/Multithread/python_multithreading_subclassing_creating_threads.php
-#https://www.udacity.com/blog/2021/09/create-a-timer-in-python-step-by-step-guide.html
-
-"""

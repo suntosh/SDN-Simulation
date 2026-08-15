@@ -1,277 +1,259 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
+"""SDN Switch (ECE 50863 Lab Project 1).
 
-"""This is the Switch Starter Code for ECE50863 Lab Project 1
-Author: Xin Du
-Email: du201@purdue.edu
-Last Modified Date: December 9th, 2021
+Rewritten from the original starter-derived implementation. Fixes:
+  * argv was indexed before the argument-count check -> IndexError, not usage
+  * dead-neighbour detection only ran when a packet arrived, so a switch whose
+    neighbours all went silent never detected anything (blocking recvfrom with
+    no timeout). The liveness sweep is now on its own timer.
+  * keep-alives went to every reachable destination instead of direct
+    neighbours, so every switch looked like every other switch's neighbour
+  * keep-alive interval (5s) and timeout (3*K = 6s) were inconsistent, causing
+    spurious flapping. Both now derive from K.
+  * KeepAliveThread died silently on a KeyError when LOCATIONS was not yet
+    populated
+  * non-daemon infinite threads made the process unkillable with Ctrl-C
+  * shared dicts were mutated from two threads with no lock
+  * pickle.loads on a UDP socket (remote code execution) replaced with JSON
+
+Usage: python3 switch.py <id> <controller host> <controller port> [-f <neighbour id>]
 """
 
-import sys, os
-from datetime import date, datetime
-import socket, pickle , threading, time
+import json
+import os
+import socket
+import sys
+import threading
+import time
+from datetime import datetime
 
-# Please do not modify the name of the log file, otherwise you will lose points because the grader won't be able to find your log file
-LOG_FILE = "switch#.log" # The log file for switches are switch#.log, where # is the id of that switch (i.e. switch0.log, switch1.log). The code for replacing # with a real number has been given to you in the main function.
+LOG_FILE = "switch#.log"
 
-# Those are logging functions to help you follow the correct logging standard
+K = 2                       # keep-alive period, seconds
+TIMEOUT_MULTIPLIER = 3      # neighbour is dead after TIMEOUT_MULTIPLIER * K
+BUFFER_SIZE = 65535
+SOCKET_TIMEOUT = 0.5        # so the liveness sweep runs without inbound traffic
 
-# "Register Request" Format is below:
-#
-# Timestamp
-# Register Request Sent
 
-#globals 
-PID = -1
-ROUTING_TABLE = {}
-LOCATIONS = {}
-SWITCH_ID = -1
-BAD_SWITCH = -1 
-SERVER_PORT = 0
-SERVER_ADDRESS = ''
-NEIGHBOUR_SWITCH_STATUS = {}
-FIRST_UPDATE = True  
+# --------------------------------------------------------------------------
+# Logging (formats are fixed by the grader -- do not reformat)
+# --------------------------------------------------------------------------
 
-K = 2
+def _timestamp():
+    return str(datetime.time(datetime.now())) + "\n"
+
+
+def write_to_log(log):
+    with open(LOG_FILE, "a+") as log_file:
+        log_file.write("\n\n")
+        log_file.writelines(log)
+
 
 def register_request_sent():
-    log = []
-    log.append(str(datetime.time(datetime.now())) + "\n")
-    log.append(f"Register Request Sent\n")
-    write_to_log(log)
+    write_to_log([_timestamp(), "Register Request Sent\n"])
 
-# "Register Response" Format is below:
-#
-# Timestamp
-# Register Response Received
 
 def register_response_received():
-    log = []
-    log.append(str(datetime.time(datetime.now())) + "\n")
-    log.append(f"Register Response received\n")
-    write_to_log(log) 
+    write_to_log([_timestamp(), "Register Response received\n"])
 
-# For the parameter "routing_table", it should be a list of lists in the form of [[...], [...], ...]. 
-# Within each list in the outermost list, the first element is <Switch ID>. The second is <Dest ID>, and the third is <Next Hop>.
-# "Routing Update" Format is below:
-#
-# Timestamp
-# Routing Update 
-# <Switch ID>,<Dest ID>:<Next Hop>
-# ...
-# ...
-# Routing Complete
-# 
-# You should also include all of the Self routes in your routing_table argument -- e.g.,  Switch (ID = 4) should include the following entry: 		
-# 4,4:4
 
 def routing_table_update(routing_table):
-    log = []
-    log.append(str(datetime.time(datetime.now())) + "\n")
-    log.append("Routing Update\n")
+    log = [_timestamp(), "Routing Update\n"]
     for row in routing_table:
         log.append(f"{row[0]},{row[1]}:{row[2]}\n")
     log.append("Routing Complete\n")
     write_to_log(log)
 
-# "Unresponsive/Dead Neighbor Detected" Format is below:
-#
-# Timestamp
-# Neighbor Dead <Neighbor ID>
-
-class NetworkSwitch(object):
-
-    def __init__(self, id, addr, port):
-        self.id = id 
-        self.addr = addr
-        self.port = port
-
-    def __str__(self):
-        return f'{self.id} {self.addr} {self.port}'
-
-
-class KeepAliveThread(threading.Thread):
-
-    def __init__(self, keep_alive_value):
-        # execute the base constructor
-        threading.Thread.__init__(self)
-        # store the value
-        self.interval = keep_alive_value
-        print('Thread Created', flush= True)
-        
-        
-    def run(self):
-        client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        while True:
-            timeval = self.interval
-            while timeval > 0:
-                time.sleep(1)
-                timeval -= 1
-            
-            
-            for k, j in ROUTING_TABLE.items():
-                if  j != -1 and k != SWITCH_ID:
-                    nt = LOCATIONS[k]
-                    client_socket.sendto(pickle.dumps(['KEEP_ALIVE', SWITCH_ID]),( nt.addr, nt.port ))
-            
-
-
 
 def neighbor_dead(switch_id):
-    log = []
-    log.append(str(datetime.time(datetime.now())) + "\n")
-    log.append(f"Neighbor Dead {switch_id}\n")
-    write_to_log(log) 
+    write_to_log([_timestamp(), f"Neighbor Dead {switch_id}\n"])
 
-# "Unresponsive/Dead Neighbor comes back online" Format is below:
-#
-# Timestamp
-# Neighbor Alive <Neighbor ID>
 
 def neighbor_alive(switch_id):
-    log = []
-    log.append(str(datetime.time(datetime.now())) + "\n")
-    log.append(f"Neighbor Alive {switch_id}\n")
-    write_to_log(log) 
-
-def write_to_log(log):
-    with open(LOG_FILE, 'a+') as log_file:
-        log_file.write("\n\n")
-        # Write to log
-        log_file.writelines(log)
+    write_to_log([_timestamp(), f"Neighbor Alive {switch_id}\n"])
 
 
-def process_data(data):
-     global ROUTING_TABLE
-     global LOCATIONS
-     global FIRST_UPDATE
-     
-     switch_changes_propagation = ''
-     network_data = pickle.loads(data)
-     
-     
-     if network_data[0] == 'ROUTE_UPDATE':
-        network_data.pop(0)
-        routing_table_update( network_data )
-        for rte in network_data:
-            ROUTING_TABLE[rte[1]] = rte[2]
-        if FIRST_UPDATE == True and BAD_SWITCH != -1 :
-            FIRST_UPDATE = False 
-            NEIGHBOUR_SWITCH_STATUS[BAD_SWITCH] = -1
-            switch_changes_propagation = f'LINK_DOWN {BAD_SWITCH}'
-            
-     elif network_data[0] == 'LOCATIONS':
-        network_data.pop(0)
-        #print('LOCATIONS' , network_data)
-        for j,k in network_data[0].items():
-            #print(j, '  ', k)
-            LOCATIONS[int(j)] = k
-     elif network_data[0] == 'KEEP_ALIVE':
-         if (network_data[1] in NEIGHBOUR_SWITCH_STATUS.keys() and NEIGHBOUR_SWITCH_STATUS[network_data[1]] == -1  and network_data[1] != BAD_SWITCH):
-             #print( 'Switch ', network_data[1], 'Back Alive')
-             neighbor_alive(network_data[1])
-             switch_changes_propagation = f'SWITCH_ALIVE {network_data[1]}'
-         NEIGHBOUR_SWITCH_STATUS[network_data[1]] = datetime.now()
+# --------------------------------------------------------------------------
+# Switch
+# --------------------------------------------------------------------------
 
-     for j, k in NEIGHBOUR_SWITCH_STATUS.items():
-         if k != -1: 
-            diff = datetime.now() - k
-            if diff.total_seconds() > float(( K * 3)):
-                NEIGHBOUR_SWITCH_STATUS[j] = -1
-                neighbor_dead(j)
-                switch_changes_propagation = f'SWITCH_DEAD {j}'
-                #print( 'Switch ', j , 'dead')
-     
-     #print(network_data, ' PID->' ,PID)
-     return switch_changes_propagation
-     
-     
+class Switch:
 
+    def __init__(self, switch_id, controller_host, controller_port, broken_link=None):
+        self.id = switch_id
+        self.controller = (controller_host, controller_port)
+        self.broken_link = broken_link      # -f: pretend this link is down
 
-def Socket_Client():
-        
-        
-    client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.settimeout(SOCKET_TIMEOUT)
 
-    msg = f'{SWITCH_ID} Register_Request'.encode(encoding='UTF-8')
+        self.lock = threading.RLock()
+        self.routing_table = {}     # dest -> next hop
+        self.locations = {}         # switch id -> (addr, port)
+        self.neighbours = set()     # configured neighbours, from the controller
+        self.last_seen = {}         # neighbour id -> monotonic timestamp
+        self.alive = {}             # neighbour id -> bool
+        self.registered = False
+        self.link_down_reported = False
+        self.stop = threading.Event()
 
-    # This is the server address, which we hard coded in server.py
-    addr = (SERVER_ADDRESS, SERVER_PORT)
+    # -- wire helpers -----------------------------------------------------
 
-    # Before sending the socket is unbound, and hence has no ability to receieve data
-    #print(f"Before sending data the socket address is {client_socket.getsockname()}")
+    def _send(self, target, message):
+        try:
+            self.sock.sendto(json.dumps(message).encode("utf-8"), tuple(target))
+        except OSError as exc:
+            print(f"[switch {self.id}] send to {target} failed: {exc}")
 
-    client_socket.sendto(msg, addr)
-    register_request_sent()
+    def _tell_controller(self, kind, target_id):
+        self._send(self.controller, {
+            "type": kind, "reporter": self.id, "target": target_id,
+        })
 
-    print(f"The socket is now bound to {client_socket.getsockname()}")
-    print(f"Recieving data from client")
-   
-    registered = False 
-    
-   
-    while True: 
-        switch_status_change_data = ''
-        (data, server_addr) = client_socket.recvfrom(1024)
+    def register(self):
+        self._send(self.controller, {"type": "REGISTER_REQUEST", "id": self.id})
+        register_request_sent()
 
-        
-        if registered == False:
-            print(f"Server Response is '{data.decode('utf-8')}'")
-            register_response_received()
-            registered = True
-            continue
-        else:
-           switch_status_change_data = process_data(data)
+    # -- state updates ----------------------------------------------------
 
-        if len( switch_status_change_data) > 2:
-            print('sending data to server')
-            client_socket.sendto( switch_status_change_data.encode(encoding='UTF-8'), addr)
-            print(switch_status_change_data)
-        
-         
-            
-        
-       
-    return None
+    def _apply_topology(self, message):
+        with self.lock:
+            for key, value in message.get("locations", {}).items():
+                self.locations[int(key)] = value
+
+            incoming = {int(n) for n in message.get("neighbours", [])}
+            for neighbour in incoming - self.neighbours:
+                # Unknown until proven otherwise; the -f link starts dead.
+                self.alive[neighbour] = (neighbour != self.broken_link)
+                self.last_seen[neighbour] = time.monotonic()
+            self.neighbours = incoming
+
+    def _handle(self, message):
+        kind = message.get("type")
+
+        if kind == "REGISTER_RESPONSE":
+            if not self.registered:
+                self.registered = True
+                register_response_received()
+            self._apply_topology(message)
+
+        elif kind == "ROUTE_UPDATE":
+            self._apply_topology(message)
+            routes = message.get("routes", [])
+            routing_table_update(routes)
+            with self.lock:
+                for row in routes:
+                    self.routing_table[int(row[1])] = int(row[2])
+            # Report the simulated link failure once we have a table to lose.
+            if self.broken_link is not None and not self.link_down_reported:
+                self.link_down_reported = True
+                self._tell_controller("LINK_DOWN", self.broken_link)
+
+        elif kind == "KEEP_ALIVE":
+            sender = int(message["id"])
+            if sender == self.broken_link:
+                return          # -f: the link is "down", ignore its traffic
+            with self.lock:
+                was_alive = self.alive.get(sender, False)
+                self.last_seen[sender] = time.monotonic()
+                self.alive[sender] = True
+                self.neighbours.add(sender)
+            if not was_alive:
+                neighbor_alive(sender)
+                self._tell_controller("SWITCH_ALIVE", sender)
+
+    def _sweep(self):
+        """Time out silent neighbours. Runs on every loop iteration, not only
+        when a packet happens to arrive."""
+        deadline = TIMEOUT_MULTIPLIER * K
+        now = time.monotonic()
+        newly_dead = []
+        with self.lock:
+            for neighbour in list(self.neighbours):
+                if neighbour == self.broken_link:
+                    continue
+                if not self.alive.get(neighbour, False):
+                    continue
+                if now - self.last_seen.get(neighbour, now) > deadline:
+                    self.alive[neighbour] = False
+                    newly_dead.append(neighbour)
+        for neighbour in newly_dead:
+            neighbor_dead(neighbour)
+            self._tell_controller("SWITCH_DEAD", neighbour)
+
+    # -- threads ----------------------------------------------------------
+
+    def _keep_alive_loop(self):
+        while not self.stop.wait(K):
+            with self.lock:
+                targets = [
+                    (n, self.locations[n])
+                    for n in self.neighbours
+                    if n != self.broken_link and n in self.locations
+                ]
+            for _neighbour, location in targets:
+                self._send(location, {"type": "KEEP_ALIVE", "id": self.id})
+
+    def run(self):
+        self.register()
+
+        keep_alive = threading.Thread(target=self._keep_alive_loop, daemon=True)
+        keep_alive.start()
+
+        retry_at = time.monotonic() + 2.0
+        while not self.stop.is_set():
+            try:
+                data, _addr = self.sock.recvfrom(BUFFER_SIZE)
+            except socket.timeout:
+                self._sweep()
+                if not self.registered and time.monotonic() > retry_at:
+                    self.register()     # datagrams get lost; re-arm
+                    retry_at = time.monotonic() + 2.0
+                continue
+            except OSError as exc:
+                print(f"[switch {self.id}] recv error: {exc}")
+                continue
+
+            try:
+                message = json.loads(data.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                print(f"[switch {self.id}] dropping malformed datagram")
+                continue
+
+            self._handle(message)
+            self._sweep()
 
 
 def main():
-
     global LOG_FILE
-    global SERVER_PORT 
-    global BAD_SWITCH
-    global SERVER_ADDRESS
-    global SWITCH_ID
-    global PID
 
-    SERVER_PORT = int(sys.argv[3])
-    SERVER_ADDRESS =  sys.argv[2]
-
-    print("started process", os.getpid())
-    
-    PID = os.getpid()
-
-    #Check for number of arguments and exit if host/port not provided
-    num_args = len(sys.argv)
-    if num_args < 4:
-        print ("switch.py <Id_self> <Controller hostname> <Controller Port>\n")
+    # Check argument count BEFORE indexing argv.
+    if len(sys.argv) < 4:
+        print("Usage: python3 switch.py <id> <controller host> <controller port> "
+              "[-f <neighbour id>]")
         sys.exit(1)
 
-    if num_args == 6 and sys.argv[4] == '-f':
-        BAD_SWITCH = int(sys.argv[5])
-        NEIGHBOUR_SWITCH_STATUS[BAD_SWITCH] = -1
-    
-    my_id = int(sys.argv[1])
-    LOG_FILE = 'switch' + str(my_id) + ".log" 
+    switch_id = int(sys.argv[1])
+    controller_host = sys.argv[2]
+    controller_port = int(sys.argv[3])
 
-   
-    SWITCH_ID = my_id 
+    broken_link = None
+    if len(sys.argv) >= 6 and sys.argv[4] == "-f":
+        broken_link = int(sys.argv[5])
 
-    t = KeepAliveThread(5)
-    t.start()
-    print( t.is_alive)
-    Socket_Client( )
-    # Write your code below or elsewhere in this file
-    t.join()
+    LOG_FILE = f"switch{switch_id}.log"
+
+    print(f"[switch {switch_id}] pid={os.getpid()} "
+          f"controller={controller_host}:{controller_port} "
+          f"broken_link={broken_link}")
+
+    switch = Switch(switch_id, controller_host, controller_port, broken_link)
+    try:
+        switch.run()
+    except KeyboardInterrupt:
+        switch.stop.set()
+        print(f"\n[switch {switch_id}] shutting down")
+
 
 if __name__ == "__main__":
     main()
